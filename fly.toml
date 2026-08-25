@@ -6,6 +6,7 @@ primary_region = 'fra'
   BASE_URL = 'https://YOUR-APP.fly.dev'
   ALLOWED_DOMAINS = 'example.com'
   CLIENT_STORAGE_PATH = '/data/oauth-clients'
+  USAGE_PATH = '/data/usage'
 
 [http_service]
   internal_port = 8080

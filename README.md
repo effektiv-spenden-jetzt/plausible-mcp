@@ -21,6 +21,18 @@ server refuses to start.
   timeseries, breakdowns and goal conversions from the same tool. To compare two
   periods, call it once per period.
 - `list_sites` returns the site domains you can pass as `site_id`.
+- `usage_stats` reports who has used the server, how often, and which accounts were
+  refused.
+
+## Usage tracking
+
+The allowlist middleware sees every caller's email address, because it has to check
+it. It records a per-person call count, a first-seen and last-seen time, and a
+per-tool breakdown to the volume at `USAGE_PATH`. Refused accounts are counted
+separately, which is how you spot someone outside the allowlist trying to connect.
+
+Read it with the `usage_stats` tool. Anyone on the allowlist can see everyone's
+rows. Unset `USAGE_PATH` to turn tracking off.
 
 ## Deploy
 

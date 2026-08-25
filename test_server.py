@@ -9,7 +9,7 @@ os.environ.setdefault("GOOGLE_CLIENT_SECRET", "GOCSPX-test")
 os.environ.setdefault("BASE_URL", "http://localhost:8000")
 os.environ.setdefault("PLAUSIBLE_API_KEY", "test-key")
 
-from server import build_query, is_allowed, is_verified, to_rows  # noqa: E402
+from server import bump, build_query, is_allowed, is_verified, to_rows  # noqa: E402
 
 
 def verified(email):
@@ -62,6 +62,29 @@ def test_to_rows():
     totals = {"results": [{"dimensions": [], "metrics": [669]}]}
     assert to_rows(totals, ["visitors"], []) == [{"visitors": 669}]
     assert to_rows({}, ["visitors"], []) == []
+
+
+def test_bump():
+    first = bump(None, "query", 100.0)
+    assert first == {
+        "calls": 1, "first_seen": 100.0, "last_seen": 100.0, "tools": {"query": 1}
+    }
+
+    second = bump(first, "query", 250.0)
+    assert second["calls"] == 2
+    assert second["first_seen"] == 100.0, "first_seen must not move"
+    assert second["last_seen"] == 250.0
+    assert second["tools"] == {"query": 2}
+
+    third = bump(second, "list_sites", 300.0)
+    assert third["tools"] == {"query": 2, "list_sites": 1}, "counts are per tool"
+
+
+def test_bump_does_not_mutate_input_tools():
+    entry = {"calls": 1, "first_seen": 1.0, "last_seen": 1.0, "tools": {"query": 1}}
+    original = entry["tools"]
+    bump(entry, "query", 2.0)
+    assert original == {"query": 1}, "caller's nested dict stays untouched"
 
 
 if __name__ == "__main__":

@@ -6,7 +6,9 @@ authorization server and delegates the human login upstream to Google.
 """
 
 import os
+from datetime import datetime, timezone
 
+import diskcache
 import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -24,6 +26,30 @@ def env_set(name: str) -> set[str]:
 ALLOWED_EMAILS = env_set("ALLOWED_EMAILS")
 ALLOWED_DOMAINS = env_set("ALLOWED_DOMAINS")
 PLAUSIBLE_URL = os.getenv("PLAUSIBLE_URL", "https://plausible.io").rstrip("/")
+USAGE_PATH = os.getenv("USAGE_PATH")
+
+usage = diskcache.Cache(USAGE_PATH) if USAGE_PATH else None
+
+
+def bump(entry: dict | None, tool: str, now: float) -> dict:
+    entry = entry or {"calls": 0, "first_seen": now, "tools": {}}
+    entry["calls"] += 1
+    entry["last_seen"] = now
+    entry["tools"] = dict(entry["tools"])
+    entry["tools"][tool] = entry["tools"].get(tool, 0) + 1
+    return entry
+
+
+def record(email: str, tool: str, now: float, allowed: bool = True) -> None:
+    if usage is None:
+        return
+    key = f"{'user' if allowed else 'denied'}::{email or 'unknown'}"
+    with usage.transact():
+        usage[key] = bump(usage.get(key), tool, now)
+
+
+def as_iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
 
 
 def is_verified(value: object) -> bool:
@@ -77,11 +103,18 @@ class Allowlist(Middleware):
     async def on_call_tool(self, context, call_next):
         token = get_access_token()
         claims = getattr(token, "claims", None) or {}
+        email = str(claims.get("email") or "").lower()
+        tool = getattr(context.message, "name", "unknown")
+        now = context.timestamp.timestamp()
+
         if not is_allowed(claims):
+            record(email, tool, now, allowed=False)
             raise ToolError(
                 f"{claims.get('email') or 'This account'} is not authorised to use "
                 "this server. Ask an admin to add you to ALLOWED_EMAILS."
             )
+
+        record(email, tool, now)
         return await call_next(context)
 
 
@@ -198,6 +231,35 @@ async def list_sites() -> list[str]:
     """List the Plausible sites this server can query, as domains to pass as site_id."""
     payload = await plausible("/api/v1/sites?limit=100", method="GET")
     return [site["domain"] for site in payload.get("sites", [])]
+
+
+@mcp.tool
+async def usage_stats() -> dict:
+    """Report who has used this server, how often, and when. Also reports accounts
+    that were refused. Anyone allowlisted can see this, including other people's rows.
+    """
+    if usage is None:
+        return {"error": "Usage tracking is off because USAGE_PATH is not set."}
+
+    users: list[dict] = []
+    denied: list[dict] = []
+    for key in list(usage):
+        entry = usage.get(key)
+        if not isinstance(entry, dict):
+            continue
+        kind, _, email = str(key).partition("::")
+        row = {
+            "email": email,
+            "calls": entry["calls"],
+            "first_seen": as_iso(entry["first_seen"]),
+            "last_seen": as_iso(entry["last_seen"]),
+            "tools": entry["tools"],
+        }
+        (users if kind == "user" else denied).append(row)
+
+    users.sort(key=lambda row: row["calls"], reverse=True)
+    denied.sort(key=lambda row: row["calls"], reverse=True)
+    return {"distinct_users": len(users), "users": users, "refused": denied}
 
 
 @mcp.custom_route("/health", methods=["GET"])

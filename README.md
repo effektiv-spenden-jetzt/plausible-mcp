@@ -1,8 +1,8 @@
 # plausible-mcp
 
-An MCP server that lets the team query Plausible Analytics from Claude. It holds a
-single Plausible API key server-side and authenticates each person with Google, so
-nobody needs their own key.
+An MCP server that lets a team query [Plausible Analytics](https://plausible.io) from
+Claude. It holds a single Plausible API key server-side and authenticates each person
+with Google, so nobody needs their own key.
 
 ## How authentication works
 
@@ -34,7 +34,25 @@ separately, which is how you spot someone outside the allowlist trying to connec
 Read it with the `usage_stats` tool. Anyone on the allowlist can see everyone's
 rows. Unset `USAGE_PATH` to turn tracking off.
 
+## Configuration
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | yes | Google OAuth client used to sign people in |
+| `PLAUSIBLE_API_KEY` | yes | Plausible key with Stats API access; shared by everyone |
+| `BASE_URL` | yes | Public URL of this server; the Google redirect URI is `BASE_URL` + `/auth/callback` |
+| `ALLOWED_DOMAINS` / `ALLOWED_EMAILS` | one of them | Who may query. Neither set means the server refuses to start |
+| `JWT_SIGNING_KEY` | recommended | Signs this server's access tokens. Without it a restart signs everyone out |
+| `CLIENT_STORAGE_PATH` | no | Where to persist OAuth client registrations. Unset means in-memory |
+| `USAGE_PATH` | no | Where to record per-person usage. Unset turns tracking off |
+
+See `.env.example` for the same list in copy-pasteable form.
+
 ## Deploy
+
+The repo ships a `fly.toml`, so the instructions below are for [Fly.io](https://fly.io),
+but nothing in the server is Fly-specific: it is one container that wants a writable
+directory and the environment above. Replace `YOUR-APP` throughout.
 
 1. Create an OAuth client in the Google Cloud console. Choose **Web application** and
    set the authorized redirect URI to `https://YOUR-APP.fly.dev/auth/callback`.
@@ -43,28 +61,30 @@ rows. Unset `USAGE_PATH` to turn tracking off.
 2. Create the app and its volume:
 
    ```bash
-   fly apps create plausible-mcp --org YOUR-ORG
-   fly volumes create plausible_mcp_data --app plausible-mcp --region fra --size 1 --yes
+   fly apps create YOUR-APP --org YOUR-ORG
+   fly volumes create plausible_mcp_data --app YOUR-APP --region fra --size 1 --yes
    ```
 
    Use `fly apps create` rather than `fly launch`, which regenerates `fly.toml`
    and would discard the volume mount and health check.
 
-3. Set the secrets:
+3. Point `app` and `BASE_URL` in `fly.toml` at your app, and set `ALLOWED_DOMAINS`
+   to your team's domain.
+
+4. Set the secrets:
 
    ```bash
-   fly secrets set --app plausible-mcp \
+   fly secrets set --app YOUR-APP \
      GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com \
      GOOGLE_CLIENT_SECRET=GOCSPX-xxx \
      PLAUSIBLE_API_KEY=xxx \
-     ALLOWED_EMAILS=guest@example.net \
+     ALLOWED_EMAILS=you@example.com \
      JWT_SIGNING_KEY="$(openssl rand -hex 32)"
    ```
 
-   `BASE_URL` and `ALLOWED_DOMAINS` are already set in `fly.toml`. Keep
-   `JWT_SIGNING_KEY` stable: changing it signs everyone out.
+   Keep `JWT_SIGNING_KEY` stable: changing it signs everyone out.
 
-4. `fly deploy --ha=false`
+5. `fly deploy --ha=false`
 
    Without `--ha=false` Fly may start two machines. Each would get its own volume,
    so a sign-in that registers on one machine fails when the next request lands on
@@ -72,7 +92,7 @@ rows. Unset `USAGE_PATH` to turn tracking off.
 
 ## Add it to Claude
 
-To add it for the whole team, go to **Settings > Connectors** in claude.ai, choose
+To add it for a whole team, go to **Settings > Connectors** in claude.ai, choose
 **Add custom connector**, and enter `https://YOUR-APP.fly.dev/mcp`. Each person
 signs in with Google the first time they use it.
 
@@ -96,3 +116,7 @@ the sign-in flow locally.
 
 Run the tests with `python test_server.py`. To exercise the OAuth flow and the tools by
 hand, use `npx @modelcontextprotocol/inspector`.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).

@@ -31,14 +31,17 @@ server refuses to start.
 2. Create the app and its volume:
 
    ```bash
-   fly launch --no-deploy --name plausible-mcp --region fra
-   fly volumes create plausible_mcp_data --region fra --size 1
+   fly apps create plausible-mcp --org YOUR-ORG
+   fly volumes create plausible_mcp_data --app plausible-mcp --region fra --size 1 --yes
    ```
+
+   Use `fly apps create` rather than `fly launch`, which regenerates `fly.toml`
+   and would discard the volume mount and health check.
 
 3. Set the secrets:
 
    ```bash
-   fly secrets set \
+   fly secrets set --app plausible-mcp \
      GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com \
      GOOGLE_CLIENT_SECRET=GOCSPX-xxx \
      PLAUSIBLE_API_KEY=xxx \

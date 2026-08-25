@@ -74,8 +74,6 @@ def to_rows(payload: dict, metrics: list[str], dimensions: list[str]) -> list[di
 
 
 class Allowlist(Middleware):
-    """Google says who you are. This says whether you may read our analytics."""
-
     async def on_call_tool(self, context, call_next):
         token = get_access_token()
         claims = getattr(token, "claims", None) or {}

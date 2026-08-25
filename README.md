@@ -1,8 +1,16 @@
 # plausible-mcp
 
-An MCP server that lets a team query [Plausible Analytics](https://plausible.io) from
-Claude. It holds a single Plausible API key server-side and authenticates each person
-with Google, so nobody needs their own key.
+An MCP server that lets everyone in an organisation query
+[Plausible Analytics](https://plausible.io) from Claude.
+
+One deployment serves the whole org. It holds a single Plausible API key server-side
+and authenticates each person with Google, so nobody needs their own key and nobody
+has to be granted access individually: put your Google Workspace domain in
+`ALLOWED_DOMAINS` and anyone with an address there can connect the first time they
+try. Colleagues outside that domain go in `ALLOWED_EMAILS`, one address at a time.
+
+If you run analytics for a team and want them reading the numbers themselves rather
+than asking you for them, that is what this is for.
 
 ## How authentication works
 
@@ -14,6 +22,16 @@ Google establishes who the person is. It does not decide whether they may read y
 analytics. A middleware checks each caller's verified email address against
 `ALLOWED_DOMAINS` and `ALLOWED_EMAILS` on every tool call. If you set neither, the
 server refuses to start.
+
+`ALLOWED_DOMAINS` is the part that makes this org-wide: it matches the domain of the
+verified address exactly, so `example.com` admits `alice@example.com` but not
+`alice@evil-example.com` or `alice@example.com.evil.com`.
+
+To revoke someone, take them out of `ALLOWED_EMAILS` or `ALLOWED_DOMAINS` and
+redeploy. Suspending their Google account stops them signing in again, but the
+allowlist reads the claims from a token this server signed, so one already issued
+keeps working until it expires. Rotating `JWT_SIGNING_KEY` invalidates every token
+at once, at the cost of signing everybody out.
 
 ## Tools
 

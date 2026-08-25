@@ -1,10 +1,11 @@
 app = 'plausible-mcp'
 primary_region = 'fra'
 
+# BASE_URL and ALLOWED_DOMAINS are deliberately not here: they differ per
+# deployment, and a placeholder in this file would overwrite the real value on
+# the next deploy. Set them with `fly secrets set` alongside the others.
 [env]
   PORT = '8080'
-  BASE_URL = 'https://YOUR-APP.fly.dev'
-  ALLOWED_DOMAINS = 'example.com'
   CLIENT_STORAGE_PATH = '/data/oauth-clients'
   USAGE_PATH = '/data/usage'
 

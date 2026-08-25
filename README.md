@@ -86,17 +86,19 @@ directory and the environment above. Replace `YOUR-APP` throughout.
    Use `fly apps create` rather than `fly launch`, which regenerates `fly.toml`
    and would discard the volume mount and health check.
 
-3. Point `app` and `BASE_URL` in `fly.toml` at your app, and set `ALLOWED_DOMAINS`
-   to your team's domain.
+3. Point `app` in `fly.toml` at your app name.
 
-4. Set the secrets:
+4. Set the configuration. `BASE_URL` and `ALLOWED_DOMAINS` go here rather than in
+   `fly.toml` because they differ per deployment, and a placeholder committed to the
+   repo would overwrite the real value on the next deploy:
 
    ```bash
    fly secrets set --app YOUR-APP \
+     BASE_URL=https://YOUR-APP.fly.dev \
+     ALLOWED_DOMAINS=your-domain.org \
      GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com \
      GOOGLE_CLIENT_SECRET=GOCSPX-xxx \
      PLAUSIBLE_API_KEY=xxx \
-     ALLOWED_EMAILS=you@example.com \
      JWT_SIGNING_KEY="$(openssl rand -hex 32)"
    ```
 

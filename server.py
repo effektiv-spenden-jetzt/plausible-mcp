@@ -26,9 +26,15 @@ ALLOWED_DOMAINS = env_set("ALLOWED_DOMAINS")
 PLAUSIBLE_URL = os.getenv("PLAUSIBLE_URL", "https://plausible.io").rstrip("/")
 
 
+def is_verified(value: object) -> bool:
+    """Google's tokeninfo reports email_verified as the string "true", while its
+    userinfo endpoint reports a real boolean. Truthiness alone would accept "false"."""
+    return value is True or str(value).strip().lower() == "true"
+
+
 def is_allowed(claims: dict) -> bool:
     email = str(claims.get("email") or "").lower()
-    if not email or not claims.get("email_verified"):
+    if not email or not is_verified(claims.get("email_verified")):
         return False
     return email in ALLOWED_EMAILS or email.rpartition("@")[2] in ALLOWED_DOMAINS
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP server for Plausible Analytics, gated behind Google sign-in"
 requires-python = ">=3.12"
 dependencies = [
-    "fastmcp>=3.4.7",
+    "fastmcp>=3.4.7,<4",
     "httpx>=0.28",
     "py-key-value-aio[disk]>=0.2",
 ]

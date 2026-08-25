@@ -9,7 +9,7 @@ os.environ.setdefault("GOOGLE_CLIENT_SECRET", "GOCSPX-test")
 os.environ.setdefault("BASE_URL", "http://localhost:8000")
 os.environ.setdefault("PLAUSIBLE_API_KEY", "test-key")
 
-from server import build_query, is_allowed, to_rows  # noqa: E402
+from server import build_query, is_allowed, is_verified, to_rows  # noqa: E402
 
 
 def verified(email):
@@ -27,6 +27,16 @@ def test_allowlist():
     assert not is_allowed({"email": "alice@example.com"}), "unverified"
     assert not is_allowed({"email": "x@example.com", "email_verified": False})
     assert not is_allowed({}), "no claims at all"
+
+
+def test_verified_flag_forms():
+    assert is_verified(True) and is_verified("true") and is_verified("True")
+    assert not is_verified(False), "boolean false"
+    assert not is_verified("false"), "tokeninfo sends strings, and 'false' is truthy"
+    assert not is_verified(None) and not is_verified("")
+
+    assert is_allowed({"email": "a@example.com", "email_verified": "true"})
+    assert not is_allowed({"email": "a@example.com", "email_verified": "false"})
 
 
 def test_build_query():

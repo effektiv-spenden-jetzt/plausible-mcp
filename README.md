@@ -49,7 +49,11 @@ server refuses to start.
    `BASE_URL` and `ALLOWED_DOMAINS` are already set in `fly.toml`. Keep
    `JWT_SIGNING_KEY` stable: changing it signs everyone out.
 
-4. `fly deploy`
+4. `fly deploy --ha=false`
+
+   Without `--ha=false` Fly may start two machines. Each would get its own volume,
+   so a sign-in that registers on one machine fails when the next request lands on
+   the other.
 
 ## Add it to Claude
 

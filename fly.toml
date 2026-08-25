@@ -1,0 +1,30 @@
+app = 'plausible-mcp'
+primary_region = 'fra'
+
+[env]
+  PORT = '8080'
+  BASE_URL = 'https://YOUR-APP.fly.dev'
+  ALLOWED_DOMAINS = 'example.com'
+  CLIENT_STORAGE_PATH = '/data/oauth-clients'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = '10s'
+    interval = '30s'
+    method = 'GET'
+    path = '/health'
+    timeout = '5s'
+
+[mounts]
+  source = 'plausible_mcp_data'
+  destination = '/data'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'

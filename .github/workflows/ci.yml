@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.12"
+
+      - name: Tests
+        run: uv run python test_server.py
+
+      # chart_app.html is a single file with an inline module, so nothing else ever
+      # parses its JavaScript. A typo in there would otherwise reach a host as a blank
+      # panel with an error only in the iframe's console.
+      - name: Chart app parses
+        run: |
+          node -e '
+            const fs = require("fs");
+            const html = fs.readFileSync("chart_app.html", "utf8");
+            const match = html.match(/<script type="module">([\s\S]*?)<\/script>/);
+            if (!match) {
+              console.error("no inline module found in chart_app.html");
+              process.exit(1);
+            }
+            fs.writeFileSync("chart-app.mjs", match[1].replace("__EXT_APPS_BUNDLE_B64__", "QQ=="));
+          '
+          node --check chart-app.mjs
+
+      # The image building is not the same as the server starting: the chart resource
+      # reads chart_app.html and vendor/ at import time, and a Dockerfile that forgets
+      # to COPY them builds perfectly and then crash-loops. That shipped once already.
+      - name: Container serves
+        run: |
+          docker build -t plausible-mcp .
+          docker run -d --name mcp -p 8000:8000 \
+            -e PORT=8000 \
+            -e BASE_URL=http://localhost:8000 \
+            -e ALLOWED_DOMAINS=example.com \
+            -e GOOGLE_CLIENT_ID=ci.apps.googleusercontent.com \
+            -e GOOGLE_CLIENT_SECRET=GOCSPX-ci \
+            -e PLAUSIBLE_API_KEY=ci-not-a-real-key \
+            plausible-mcp
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server never became healthy"
+          docker logs mcp
+          exit 1

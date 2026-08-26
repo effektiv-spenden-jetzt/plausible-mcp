@@ -405,6 +405,9 @@ function renderLegend(ids) {
   if (current.total_sites > ids.length) {
     notes.push(`showing ${ids.length} of ${current.total_sites} sites`);
   }
+  if (current.unavailable?.length) {
+    notes.push(`no data returned for ${current.unavailable.join(", ")}`);
+  }
   if (currentScale() === "indexed") {
     // A series that never leaves zero has nothing to rebase from, so it is absent from
     // the plot. Say so rather than letting it vanish.

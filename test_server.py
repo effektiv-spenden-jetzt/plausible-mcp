@@ -98,8 +98,8 @@ def chart_api(*, buckets=(), labels=None, total=0, sites=(), resolved=None, seen
     tell which number the chart actually used."""
 
     async def call(path, method="POST", json=None):
-        if seen is not None:
-            seen.append(json)
+        if seen is not None and json is not None:
+            seen.append(json)  # the site listing is a GET with no body
         if "sites" in path:
             return {"sites": [{"domain": domain} for domain in sites]}
         payload = {"query": {"date_range": resolved or DEFAULT_RESOLVED}}
@@ -179,7 +179,7 @@ def test_previous_range():
 
 def test_chart_asks_for_time_labels_without_leaking_into_query():
     seen = []
-    run_chart(chart_api(seen=seen), site_ids=["a.com"])
+    run_chart(chart_api(sites=["a.com"], seen=seen), site_ids=["a.com"])
     timeseries = [body for body in seen if body["dimensions"]]
     aggregate = [body for body in seen if not body["dimensions"]]
     assert timeseries and timeseries[0]["include"]["time_labels"] is True
@@ -197,6 +197,7 @@ def test_chart_totals_come_from_the_aggregate_not_the_sum():
             buckets=[("2026-08-01", 10), ("2026-08-02", 10), ("2026-08-03", 10)],
             labels=["2026-08-01", "2026-08-02", "2026-08-03"],
             total=18,
+            sites=["a.com"],
         ),
         site_ids=["a.com"],
     )
@@ -207,7 +208,7 @@ def test_chart_echoes_filters_and_reports_sites_before_truncation():
     filters = [["is", "visit:channel", ["Organic Search"]]]
     seen = []
     result = run_chart(
-        chart_api(seen=seen),
+        chart_api(sites=[f"site{i}.com" for i in range(23)], seen=seen),
         site_ids=[f"site{i}.com" for i in range(23)],
         filters=filters,
     )
@@ -219,17 +220,17 @@ def test_chart_echoes_filters_and_reports_sites_before_truncation():
 
 def test_chart_refuses_to_compare_an_open_ended_range():
     seen = []
-    result = run_chart(chart_api(seen=seen), site_ids=["a.com"], date_range="all", compare=True)
+    result = run_chart(chart_api(sites=["a.com"], seen=seen), site_ids=["a.com"], date_range="all", compare=True)
     assert result["compare"] is False, "nothing precedes all time"
     assert result["previous"] is None
 
     baseline = []
-    run_chart(chart_api(seen=baseline), site_ids=["a.com"], date_range="all")
+    run_chart(chart_api(sites=["a.com"], seen=baseline), site_ids=["a.com"], date_range="all")
     assert len(seen) == len(baseline), "and it costs no extra requests"
 
 
 def test_chart_compares_against_the_preceding_window():
-    result = run_chart(chart_api(total=5), site_ids=["a.com"], date_range="7d", compare=True)
+    result = run_chart(chart_api(sites=["a.com"], total=5), site_ids=["a.com"], date_range="7d", compare=True)
     assert result["compare"] is True
     assert result["previous"]["date_range"] == ["2026-07-29", "2026-07-31"]
     assert result["previous"]["totals"]["a.com"] == 5
@@ -238,10 +239,10 @@ def test_chart_compares_against_the_preceding_window():
 def test_chart_survives_a_failed_comparison():
     """The comparison is a garnish: if only the previous period fails, the chart should
     still render the current one."""
-    good = chart_api(total=7)
+    good = chart_api(sites=["a.com"], total=7)
 
     async def previous_period_broken(path, method="POST", json=None):
-        if json.get("date_range") == ["2026-07-29", "2026-07-31"]:
+        if json and json.get("date_range") == ["2026-07-29", "2026-07-31"]:
             raise server.ToolError("Plausible returned 500")
         return await good(path, method, json)
 
@@ -253,13 +254,15 @@ def test_chart_survives_a_failed_comparison():
 def test_chart_keeps_the_requested_range_not_the_resolved_one():
     """The resolved range is always a list; echoing it back would turn every preset into
     a custom range in the picker."""
-    result = run_chart(chart_api(), site_ids=["a.com"], date_range="30d")
+    result = run_chart(chart_api(sites=["a.com"]), site_ids=["a.com"], date_range="30d")
     assert result["date_range"] == "30d"
     assert result["resolved_range"] == DEFAULT_RESOLVED
 
 
 def test_chart_drops_a_failing_site_but_surfaces_a_total_failure():
     async def one_bad_site(path, method="POST", json=None):
+        if "sites" in path:
+            return {"sites": [{"domain": "good.com"}, {"domain": "bad.com"}]}
         if json["site_id"] == "bad.com":
             raise server.ToolError("Plausible returned 404")
         return {"results": [], "query": {"date_range": DEFAULT_RESOLVED}}
@@ -271,6 +274,8 @@ def test_chart_drops_a_failing_site_but_surfaces_a_total_failure():
     )
 
     async def everything_broken(path, method="POST", json=None):
+        if "sites" in path:
+            return {"sites": [{"domain": "a.com"}]}
         raise server.ToolError("Plausible returned 500")
 
     try:
@@ -279,6 +284,59 @@ def test_chart_drops_a_failing_site_but_surfaces_a_total_failure():
         pass
     else:
         raise AssertionError("a total failure must surface, not render an empty chart")
+
+
+def raises(fn, *, contains):
+    try:
+        fn()
+    except server.ToolError as e:
+        assert contains in str(e), f"expected {contains!r} in {str(e)!r}"
+        return str(e)
+    raise AssertionError(f"expected a ToolError mentioning {contains!r}")
+
+
+def test_chart_rejects_bad_inputs_by_naming_the_good_ones():
+    """Plausible answers "daily" with `Invalid dimension "time:daily"`, which tells the
+    model what it got wrong but never what would have been right. Say the valid values
+    so it can correct itself instead of failing the whole call."""
+    api = chart_api(sites=["a.com"])
+    message = raises(lambda: run_chart(api, interval="daily"), contains="interval must be one of")
+    assert "day" in message and "'daily'" in message
+
+    raises(lambda: run_chart(api, metric="sessions"), contains="metric must be one of")
+    raises(lambda: run_chart(api, scale="logarithmic"), contains="scale must be one of")
+    raises(lambda: run_chart(api, date_range="last_30_days"), contains="date_range must be one of")
+    raises(lambda: run_chart(api, date_range=["2026-01-01"]), contains="exactly two ISO dates")
+
+
+def test_chart_names_the_sites_it_has_when_given_one_it_does_not():
+    """A wrong site_id gets a 401 from Plausible that reads like the API key is broken."""
+    message = raises(
+        lambda: run_chart(chart_api(sites=["a.com", "b.com"]), site_ids=["nope.com"]),
+        contains="No such site",
+    )
+    assert "a.com" in message and "b.com" in message
+
+
+def test_chart_accepts_a_site_given_as_a_url():
+    result = run_chart(
+        chart_api(sites=["a.com"]), site_ids=["https://A.com/"]
+    )
+    assert list(result["series"]) == ["a.com"], "models pass the URL they have seen"
+
+
+def test_chart_reports_a_site_that_returned_nothing():
+    async def one_bad_site(path, method="POST", json=None):
+        if "sites" in path:
+            return {"sites": [{"domain": "good.com"}, {"domain": "bad.com"}]}
+        if json["site_id"] == "bad.com":
+            raise server.ToolError("Plausible returned 401")
+        return {"results": [], "query": {"date_range": DEFAULT_RESOLVED}}
+
+    result = run_chart(one_bad_site)
+    assert list(result["series"]) == ["good.com"]
+    assert result["unavailable"] == ["bad.com"], "a partial chart must say it is partial"
+    assert result["sites"] == ["good.com", "bad.com"], "so a retry can bring it back"
 
 
 def test_chart_defaults_to_all_sites():

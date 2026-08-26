@@ -32,6 +32,20 @@ CHART_LIMIT = 10000  # Plausible's max page size; hourly over 12mo is 8760 bucke
 # than 0 — drawing it as 0% would invent a datapoint.
 COUNT_METRICS = {"visitors", "visits", "pageviews", "events", "total_revenue"}
 
+# Checked before the request goes out. Plausible rejects a wrong value with its own
+# schema error ("Invalid dimension \"time:daily\""), which tells a model what it got
+# wrong but never what would have been right, so it cannot correct itself.
+METRICS = (
+    "visitors", "visits", "pageviews", "views_per_visit", "bounce_rate",
+    "visit_duration", "events", "scroll_depth", "percentage", "time_on_page",
+    "conversion_rate", "group_conversion_rate", "average_revenue", "total_revenue",
+)
+INTERVALS = ("hour", "day", "week", "month")
+SCALES = ("linear", "log", "indexed")
+DATE_RANGES = (
+    "day", "24h", "7d", "28d", "30d", "91d", "month", "6mo", "12mo", "year", "all",
+)
+
 
 def env_set(name: str) -> set[str]:
     return {v.strip().lower() for v in os.getenv(name, "").split(",") if v.strip()}
@@ -131,6 +145,33 @@ def densify(payload: dict, metric: str, dimension: str) -> list[dict]:
         return [{"date": date, "value": value} for date, value in values.items()]
     fill = 0 if metric in COUNT_METRICS else None
     return [{"date": label, "value": values.get(label, fill)} for label in labels]
+
+
+def one_of(value: str, allowed: tuple[str, ...], name: str) -> str:
+    if value not in allowed:
+        raise ToolError(f"{name} must be one of {', '.join(allowed)}. Got {value!r}.")
+    return value
+
+
+def normalise_site(value: str) -> str:
+    """Models reach for the URL they have seen rather than the bare domain Plausible
+    wants, and Plausible answers a wrong site_id with a 401 that reads like the API key
+    is broken."""
+    site = value.strip().lower()
+    for prefix in ("https://", "http://"):
+        site = site.removeprefix(prefix)
+    return site.rstrip("/")
+
+
+def check_date_range(date_range: str | list[str]) -> str | list[str]:
+    if isinstance(date_range, str):
+        return one_of(date_range, DATE_RANGES, "date_range")
+    if len(date_range) != 2:
+        raise ToolError(
+            "date_range as a list must be exactly two ISO dates, "
+            f"for example [\"2026-01-01\", \"2026-01-31\"]. Got {date_range!r}."
+        )
+    return date_range
 
 
 def previous_range(resolved: list[str]) -> list[str] | None:
@@ -321,12 +362,16 @@ async def chart(
       site this server can query (capped at 8 — the categorical palette caps out
       there too).
 
-    metric: any single metric accepted by the `query` tool, for example visitors,
-      visits, pageviews, views_per_visit or bounce_rate.
+    metric: exactly one of visitors, visits, pageviews, views_per_visit, bounce_rate,
+      visit_duration, events, scroll_depth, percentage, time_on_page, conversion_rate,
+      group_conversion_rate, average_revenue, total_revenue.
 
-    date_range: same values as `query`'s date_range.
+    date_range: one of "day", "24h", "7d", "28d", "30d", "91d", "month", "6mo",
+      "12mo", "year", "all", or a pair of inclusive ISO dates such as
+      ["2026-01-01", "2026-01-31"].
 
-    interval: hour, day, week or month — how the time series is bucketed.
+    interval: exactly one of hour, day, week, month — how the series is bucketed.
+      Not "daily" or "weekly".
 
     filters: same shape as `query`'s filters, applied to every site.
 
@@ -338,7 +383,23 @@ async def chart(
       rebased to 100 at its first value, which is how you compare sites whose traffic
       differs by orders of magnitude). Purely a display choice; the data is the same.
     """
-    requested = site_ids or await site_domains()
+    one_of(metric, METRICS, "metric")
+    one_of(interval, INTERVALS, "interval")
+    one_of(scale, SCALES, "scale")
+    date_range = check_date_range(date_range)
+
+    known = await site_domains()
+    if site_ids:
+        requested = [normalise_site(site) for site in site_ids]
+        unknown = [site for site in requested if site not in known]
+        if unknown:
+            raise ToolError(
+                f"No such site: {', '.join(unknown)}. "
+                f"This server can query: {', '.join(known)}."
+            )
+    else:
+        requested = known
+
     ids = requested[:MAX_CHART_SERIES]
     dims = [f"time:{interval}"]
 
@@ -410,6 +471,9 @@ async def chart(
         # with this, so one bad response does not shrink the chart for the rest of the session.
         "sites": ids,
         "total_sites": len(requested),
+        # A site that answered for neither query is missing from the chart. Name it,
+        # rather than quietly drawing fewer lines than were asked for.
+        "unavailable": [site for site in ids if site not in dict(current)],
         "previous": previous,
     }
 

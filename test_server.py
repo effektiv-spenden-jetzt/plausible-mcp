@@ -89,39 +89,200 @@ def test_bump_does_not_mutate_input_tools():
     assert original == {"query": 1}, "caller's nested dict stays untouched"
 
 
-def test_chart_overlays_sites_and_caps_at_max_series():
-    async def fake_plausible(path, method="POST", json=None):
-        assert json["dimensions"] == ["time:day"]
-        return {"results": [{"dimensions": ["2026-08-01"], "metrics": [10]}]}
+DEFAULT_RESOLVED = ["2026-08-01T00:00:00+00:00", "2026-08-03T23:59:59+00:00"]
 
+
+def chart_api(*, buckets=(), labels=None, total=0, sites=(), resolved=None, seen=None):
+    """Fake `plausible` for chart(), which asks two different questions per site: a
+    bucketed timeseries and a separate aggregate. Answer them differently so a test can
+    tell which number the chart actually used."""
+
+    async def call(path, method="POST", json=None):
+        if seen is not None:
+            seen.append(json)
+        if "sites" in path:
+            return {"sites": [{"domain": domain} for domain in sites]}
+        payload = {"query": {"date_range": resolved or DEFAULT_RESOLVED}}
+        if json["dimensions"]:
+            payload["results"] = [
+                {"dimensions": [date], "metrics": [value]} for date, value in buckets
+            ]
+            if labels is not None:
+                payload["meta"] = {"time_labels": labels}
+        else:
+            payload["results"] = [{"dimensions": [], "metrics": [total]}]
+        return payload
+
+    return call
+
+
+def run_chart(fake, **kwargs):
     original = server.plausible
-    server.plausible = fake_plausible
+    server.plausible = fake
     try:
-        result = asyncio.run(server.chart(
-            site_ids=[f"site{i}.com" for i in range(10)], metric="visitors",
-            date_range="7d", interval="day",
-        ))
+        return asyncio.run(server.chart(**kwargs))
     finally:
         server.plausible = original
 
-    assert result["metric"] == "visitors" and result["interval"] == "day"
-    assert len(result["series"]) == server.MAX_CHART_SERIES, "caps to the palette's slot count"
-    assert result["series"]["site0.com"] == [{"date": "2026-08-01", "value": 10}]
+
+def test_densify_fills_the_buckets_plausible_omits():
+    payload = {
+        "results": [{"dimensions": ["2026-08-02"], "metrics": [7]}],
+        "meta": {"time_labels": ["2026-08-01", "2026-08-02", "2026-08-03"]},
+    }
+    assert server.densify(payload, "visitors", "time:day") == [
+        {"date": "2026-08-01", "value": 0},
+        {"date": "2026-08-02", "value": 7},
+        {"date": "2026-08-03", "value": 0},
+    ], "a count metric reads zero when nobody came"
+
+    rates = server.densify(payload, "bounce_rate", "time:day")
+    assert [point["value"] for point in rates] == [None, 7, None], (
+        "a rate over zero traffic is undefined, not 0%"
+    )
+
+    unlabelled = {"results": [{"dimensions": ["2026-08-02"], "metrics": [7]}]}
+    assert server.densify(unlabelled, "visitors", "time:day") == [
+        {"date": "2026-08-02", "value": 7}
+    ], "without time_labels, fall back to whatever came back"
+
+
+def test_densify_joins_on_the_row_dimension_value():
+    """If meta.time_labels and the row keys ever stop matching, every lookup misses and
+    the chart renders blank with no error. Pin the join."""
+    payload = {
+        "results": [{"dimensions": ["2026-08-02 00:00:00"], "metrics": [5]}],
+        "meta": {"time_labels": ["2026-08-01 00:00:00", "2026-08-02 00:00:00"]},
+    }
+    assert [p["value"] for p in server.densify(payload, "visitors", "time:hour")] == [0, 5]
+
+
+def test_previous_range():
+    assert server.previous_range(
+        ["2024-09-04T00:00:00+00:00", "2024-09-10T23:59:59+00:00"]
+    ) == ["2024-08-28", "2024-09-03"], "seven days, immediately before"
+
+    assert server.previous_range(
+        ["2024-03-01T00:00:00+00:00", "2024-03-31T23:59:59+00:00"]
+    ) == ["2024-01-30", "2024-02-29"], "crosses a month boundary into a leap day"
+
+    assert server.previous_range(
+        ["2024-09-10T00:00:00+00:00", "2024-09-10T23:59:59+00:00"]
+    ) == ["2024-09-09", "2024-09-09"], "a single day compares to the day before"
+
+    assert server.previous_range(
+        ["2024-09-09T14:00:00+00:00", "2024-09-10T13:59:59+00:00"]
+    ) is None, "a rolling window has no whole-day previous period"
+
+    assert server.previous_range([]) is None
+
+
+def test_chart_asks_for_time_labels_without_leaking_into_query():
+    seen = []
+    run_chart(chart_api(seen=seen), site_ids=["a.com"])
+    timeseries = [body for body in seen if body["dimensions"]]
+    aggregate = [body for body in seen if not body["dimensions"]]
+    assert timeseries and timeseries[0]["include"]["time_labels"] is True
+    assert aggregate and "time_labels" not in aggregate[0]["include"]
+
+    plain = build_query("a.com", ["visitors"], "7d", ["time:day"], None, None, 100, True)
+    assert "time_labels" not in plain["include"], "the query tool is unchanged"
+
+
+def test_chart_totals_come_from_the_aggregate_not_the_sum():
+    """visitors is a UNIQUE count, so summing the daily buckets double-counts anyone who
+    came back. The fixture's buckets sum to 30; the real answer is 18."""
+    result = run_chart(
+        chart_api(
+            buckets=[("2026-08-01", 10), ("2026-08-02", 10), ("2026-08-03", 10)],
+            labels=["2026-08-01", "2026-08-02", "2026-08-03"],
+            total=18,
+        ),
+        site_ids=["a.com"],
+    )
+    assert result["totals"]["a.com"] == 18
+
+
+def test_chart_echoes_filters_and_reports_sites_before_truncation():
+    filters = [["is", "visit:channel", ["Organic Search"]]]
+    seen = []
+    result = run_chart(
+        chart_api(seen=seen),
+        site_ids=[f"site{i}.com" for i in range(23)],
+        filters=filters,
+    )
+    assert len(result["series"]) == server.MAX_CHART_SERIES, "caps to the palette's slots"
+    assert result["total_sites"] == 23, "counted before the cap, so the UI can say so"
+    assert result["filters"] == filters, "echoed back or refetch silently drops them"
+    assert all(body["filters"] == filters for body in seen), "applied to every site"
+
+
+def test_chart_refuses_to_compare_an_open_ended_range():
+    seen = []
+    result = run_chart(chart_api(seen=seen), site_ids=["a.com"], date_range="all", compare=True)
+    assert result["compare"] is False, "nothing precedes all time"
+    assert result["previous"] is None
+
+    baseline = []
+    run_chart(chart_api(seen=baseline), site_ids=["a.com"], date_range="all")
+    assert len(seen) == len(baseline), "and it costs no extra requests"
+
+
+def test_chart_compares_against_the_preceding_window():
+    result = run_chart(chart_api(total=5), site_ids=["a.com"], date_range="7d", compare=True)
+    assert result["compare"] is True
+    assert result["previous"]["date_range"] == ["2026-07-29", "2026-07-31"]
+    assert result["previous"]["totals"]["a.com"] == 5
+
+
+def test_chart_survives_a_failed_comparison():
+    """The comparison is a garnish: if only the previous period fails, the chart should
+    still render the current one."""
+    good = chart_api(total=7)
+
+    async def previous_period_broken(path, method="POST", json=None):
+        if json.get("date_range") == ["2026-07-29", "2026-07-31"]:
+            raise server.ToolError("Plausible returned 500")
+        return await good(path, method, json)
+
+    result = run_chart(previous_period_broken, site_ids=["a.com"], date_range="7d", compare=True)
+    assert result["compare"] is False and result["previous"] is None
+    assert result["totals"]["a.com"] == 7
+
+
+def test_chart_keeps_the_requested_range_not_the_resolved_one():
+    """The resolved range is always a list; echoing it back would turn every preset into
+    a custom range in the picker."""
+    result = run_chart(chart_api(), site_ids=["a.com"], date_range="30d")
+    assert result["date_range"] == "30d"
+    assert result["resolved_range"] == DEFAULT_RESOLVED
+
+
+def test_chart_drops_a_failing_site_but_surfaces_a_total_failure():
+    async def one_bad_site(path, method="POST", json=None):
+        if json["site_id"] == "bad.com":
+            raise server.ToolError("Plausible returned 404")
+        return {"results": [], "query": {"date_range": DEFAULT_RESOLVED}}
+
+    result = run_chart(one_bad_site, site_ids=["good.com", "bad.com"])
+    assert set(result["series"]) == {"good.com"}, "one bad domain costs only that domain"
+    assert result["sites"] == ["good.com", "bad.com"], (
+        "the UI refetches with this, so a one-off failure must not shrink the chart"
+    )
+
+    async def everything_broken(path, method="POST", json=None):
+        raise server.ToolError("Plausible returned 500")
+
+    try:
+        run_chart(everything_broken, site_ids=["a.com"])
+    except server.ToolError:
+        pass
+    else:
+        raise AssertionError("a total failure must surface, not render an empty chart")
 
 
 def test_chart_defaults_to_all_sites():
-    async def fake_plausible(path, method="POST", json=None):
-        if "sites" in path:
-            return {"sites": [{"domain": "a.com"}, {"domain": "b.com"}]}
-        return {"results": []}
-
-    original = server.plausible
-    server.plausible = fake_plausible
-    try:
-        result = asyncio.run(server.chart())
-    finally:
-        server.plausible = original
-
+    result = run_chart(chart_api(sites=["a.com", "b.com"]))
     assert set(result["series"]) == {"a.com", "b.com"}
 
 

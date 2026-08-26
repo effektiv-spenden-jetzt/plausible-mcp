@@ -8,13 +8,13 @@ authorization server and delegates the human login upstream to Google.
 import asyncio
 import base64
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import diskcache
 import httpx
 from fastmcp import FastMCP
-from fastmcp.apps import AppConfig
+from fastmcp.apps import AppConfig, ResourcePermissions
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.dependencies import get_access_token
@@ -26,6 +26,11 @@ ROOT = Path(__file__).parent
 CHART_RESOURCE_URI = "ui://chart/mcp-app.html"
 MAX_CHART_SERIES = 8  # matches the dataviz palette's validated categorical slot count
 CHART_LIMIT = 10000  # Plausible's max page size; hourly over 12mo is 8760 buckets
+
+# Metrics that are a count of things and so read as 0 when a bucket has no traffic.
+# Everything else is a rate or an average, which is undefined over zero traffic rather
+# than 0 — drawing it as 0% would invent a datapoint.
+COUNT_METRICS = {"visitors", "visits", "pageviews", "events", "total_revenue"}
 
 
 def env_set(name: str) -> set[str]:
@@ -106,6 +111,45 @@ def to_rows(payload: dict, metrics: list[str], dimensions: list[str]) -> list[di
         | dict(zip(metrics, row.get("metrics", [])))
         for row in payload.get("results", [])
     ]
+
+
+def densify(payload: dict, metric: str, dimension: str) -> list[dict]:
+    """Join a timeseries onto every bucket in the range, not just the ones with traffic.
+
+    Plausible omits empty buckets ("If no data falls into a given time bucket, no values
+    are returned"), so a quiet day silently disappears from the axis and the line joins
+    straight across it. include.time_labels asks for the full bucket list; this joins the
+    rows onto it. Done per site because "all" resolves to each site's own first datapoint,
+    so there is no single axis to share.
+    """
+    values = {
+        row.get(dimension): row.get(metric)
+        for row in to_rows(payload, [metric], [dimension])
+    }
+    labels = payload.get("meta", {}).get("time_labels")
+    if not labels:
+        return [{"date": date, "value": value} for date, value in values.items()]
+    fill = 0 if metric in COUNT_METRICS else None
+    return [{"date": label, "value": values.get(label, fill)} for label in labels]
+
+
+def previous_range(resolved: list[str]) -> list[str] | None:
+    """The equal-length window immediately before `resolved`, as plain ISO dates.
+
+    Deliberately date-only arithmetic. The resolved range carries the site's own UTC
+    offset and ends at 23:59:59, so subtracting timedeltas from the datetimes drifts an
+    hour across a DST boundary and trips over the off-by-one second. Returns None for a
+    rolling window that does not start at midnight (24h and friends), where a
+    day-granular previous period would be the wrong length.
+    """
+    if not resolved or len(resolved) < 2:
+        return None
+    start, end = (datetime.fromisoformat(value) for value in resolved[:2])
+    if (start.hour, start.minute, start.second) != (0, 0, 0):
+        return None
+    span = end.date() - start.date()
+    previous_end = start.date() - timedelta(days=1)
+    return [(previous_end - span).isoformat(), previous_end.isoformat()]
 
 
 class Allowlist(Middleware):
@@ -264,11 +308,14 @@ async def chart(
     metric: str = "visitors",
     date_range: str | list[str] = "30d",
     interval: str = "day",
+    filters: list | None = None,
+    compare: bool = False,
+    scale: str = "linear",
 ) -> dict:
     """Render an interactive chart comparing one metric across one or more sites
     over time, overlaid on shared axes. The chart lets the viewer toggle sites,
-    switch metric, date range and interval, and hover for exact values, without
-    involving the model again.
+    switch metric, date range, interval and y-axis scale, and hover for exact
+    values, without involving the model again.
 
     site_ids: domains to overlay, as returned by list_sites. Omit to chart every
       site this server can query (capped at 8 — the categorical palette caps out
@@ -280,23 +327,97 @@ async def chart(
     date_range: same values as `query`'s date_range.
 
     interval: hour, day, week or month — how the time series is bucketed.
+
+    filters: same shape as `query`'s filters, applied to every site.
+
+    compare: also fetch the equal-length period immediately before, so the chart can
+      show each site's change. Ignored for date_range "all" and for rolling windows
+      like "24h", which have no comparable preceding period.
+
+    scale: the y-axis the chart opens on — "linear", "log", or "indexed" (every site
+      rebased to 100 at its first value, which is how you compare sites whose traffic
+      differs by orders of magnitude). Purely a display choice; the data is the same.
     """
-    ids = (site_ids or await site_domains())[:MAX_CHART_SERIES]
+    requested = site_ids or await site_domains()
+    ids = requested[:MAX_CHART_SERIES]
     dims = [f"time:{interval}"]
 
-    async def points(site_id: str) -> list[dict]:
-        body = build_query(site_id, [metric], date_range, dims, None, None, CHART_LIMIT, True)
-        payload = await plausible("/api/v2/query", json=body)
-        return [
-            {"date": row.get(dims[0]), "value": row.get(metric)}
-            for row in to_rows(payload, [metric], dims)
+    async def fetch(site_id: str, period: str | list[str]) -> dict:
+        body = build_query(site_id, [metric], period, dims, filters, None, CHART_LIMIT, True)
+        body["include"]["time_labels"] = True
+        # The aggregate is a separate question, not the sum of the buckets: visitors is
+        # a UNIQUE count, so adding up the days double-counts anyone who came back.
+        aggregate = build_query(site_id, [metric], period, [], filters, None, 1, True)
+        series, totals = await asyncio.gather(
+            plausible("/api/v2/query", json=body),
+            plausible("/api/v2/query", json=aggregate),
+        )
+        rows = to_rows(totals, [metric], [])
+        return {
+            "points": densify(series, metric, dims[0]),
+            "total": rows[0].get(metric) if rows else None,
+            "resolved": series.get("query", {}).get("date_range"),
+        }
+
+    async def gather_period(period: str | list[str], sites: list[str]) -> list[tuple[str, dict]]:
+        """One site 404ing should cost that site, not the whole chart."""
+        results = await asyncio.gather(
+            *(fetch(site_id, period) for site_id in sites), return_exceptions=True
+        )
+        kept = [
+            (site_id, result)
+            for site_id, result in zip(sites, results)
+            if not isinstance(result, BaseException)
         ]
+        if sites and not kept:
+            # Every site failed, so this is not one bad domain — say why rather than
+            # rendering an empty chart and letting the real error disappear.
+            raise results[0]
+        return kept
 
-    series = dict(zip(ids, await asyncio.gather(*(points(site_id) for site_id in ids))))
-    return {"metric": metric, "interval": interval, "date_range": date_range, "series": series}
+    current = await gather_period(date_range, ids)
+    resolved = next((row["resolved"] for _, row in current if row.get("resolved")), None)
+
+    previous = None
+    if compare and date_range != "all":
+        window = previous_range(resolved) if resolved else None
+        if window:
+            try:
+                before = await gather_period(window, [site_id for site_id, _ in current])
+            except ToolError:
+                # The comparison is a garnish. Losing it should not take the chart with it.
+                before = None
+            if before:
+                previous = {
+                    "date_range": window,
+                    "series": {site_id: row["points"] for site_id, row in before},
+                    "totals": {site_id: row["total"] for site_id, row in before},
+                }
+
+    return {
+        "metric": metric,
+        "interval": interval,
+        # The range as asked for, verbatim. The resolved pair is always a list, and
+        # feeding that back would turn every preset into a "custom range" in the UI.
+        "date_range": date_range,
+        "resolved_range": resolved,
+        "scale": scale,
+        "filters": filters,
+        "compare": previous is not None,
+        "series": {site_id: row["points"] for site_id, row in current},
+        "totals": {site_id: row["total"] for site_id, row in current},
+        # What was asked for, including sites that failed this time round. The UI refetches
+        # with this, so one bad response does not shrink the chart for the rest of the session.
+        "sites": ids,
+        "total_sites": len(requested),
+        "previous": previous,
+    }
 
 
-@mcp.resource(CHART_RESOURCE_URI)
+@mcp.resource(
+    CHART_RESOURCE_URI,
+    app=AppConfig(permissions=ResourcePermissions(clipboard_write={})),
+)
 def chart_ui() -> str:
     return CHART_HTML
 

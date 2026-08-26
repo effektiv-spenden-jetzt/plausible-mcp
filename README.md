@@ -41,8 +41,13 @@ at once, at the cost of signing everybody out.
 - `list_sites` returns the site domains you can pass as `site_id`.
 - `chart` renders an interactive chart overlaying one metric across one or more
   sites, in hosts that support [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
-  (e.g. Claude Desktop). The viewer can toggle sites, switch metric, date range
-  and interval, and hover for exact values without asking the model again.
+  (e.g. Claude Desktop). The viewer can toggle sites, switch metric, date range,
+  interval and y-axis scale, turn on period-over-period comparison, and hover for
+  exact values without asking the model again. Sites whose traffic differs by orders
+  of magnitude are best read on the log or indexed axis — indexed rebases every site
+  to 100 at its first value, so the question becomes "which is growing faster" rather
+  than "which is bigger". The chart also tells the model what is currently on screen,
+  so a follow-up question about a spike lands with the right context.
 - `usage_stats` reports who has used the server, how often, and which accounts were
   refused.
 

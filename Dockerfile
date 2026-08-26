@@ -6,6 +6,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 RUN uv pip install --system --no-cache -r pyproject.toml
 
-COPY server.py ./
+COPY server.py chart_app.html ./
+COPY vendor/ vendor/
 
 CMD ["python", "server.py"]

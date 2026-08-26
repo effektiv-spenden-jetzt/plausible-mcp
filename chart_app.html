@@ -18,6 +18,7 @@
     --border:         rgba(11,11,11,0.10);
     --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
     --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+    --delta-up: #006300; --delta-down: #d03b3b;
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) .viz-root {
@@ -27,6 +28,7 @@
       --gridline: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
       --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
       --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+      --delta-up: #0ca30c; --delta-down: #e66767;
     }
   }
   :root[data-theme="dark"] .viz-root {
@@ -36,6 +38,7 @@
     --gridline: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
     --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
     --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    --delta-up: #0ca30c; --delta-down: #e66767;
   }
 
   * { box-sizing: border-box; }
@@ -80,7 +83,9 @@
   .baseline { stroke: var(--baseline); stroke-width: 1; }
   .axis-label { fill: var(--text-muted); font-size: 11px; }
   .series-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .series-line.previous { stroke-dasharray: 4 4; opacity: 0.45; }
   .series-dot { stroke: var(--surface-1); stroke-width: 2; }
+  .ref-line { stroke: var(--baseline); stroke-width: 1; }
   .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
   .hit-layer { fill: transparent; cursor: crosshair; }
 
@@ -106,6 +111,25 @@
   }
   .legend-item[aria-pressed="false"] { opacity: 0.4; }
   .legend-swatch { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+  /* Values sit in text tokens, never the series colour — the swatch carries identity. */
+  .legend-total { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .legend-delta { font-variant-numeric: tabular-nums; min-width: 4.5em; text-align: right; }
+  .legend-delta.up { color: var(--delta-up); }
+  .legend-delta.down { color: var(--delta-down); }
+  .legend-note { font-size: 12px; color: var(--text-muted); align-self: center; }
+
+  .filter-chip {
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    max-width: 22em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .tooltip {
     position: absolute;
@@ -145,8 +169,12 @@
   <div class="filters">
     <select id="metric-select" aria-label="Metric"></select>
     <select id="date-range-select" aria-label="Date range"></select>
-    <select id="interval-select" aria-label="Scale"></select>
+    <select id="interval-select" aria-label="Interval"></select>
+    <select id="scale-select" aria-label="Y-axis scale"></select>
+    <span id="filter-chip" class="filter-chip" hidden></span>
     <div class="spacer"></div>
+    <button id="compare-toggle" type="button" aria-pressed="false">Compare</button>
+    <button id="copy-button" type="button" hidden>Copy CSV</button>
     <button id="table-toggle" type="button" aria-pressed="false">Table view</button>
   </div>
   <div class="card" id="card">
@@ -173,11 +201,19 @@ const DATE_RANGES = [
   ["12mo", "Last 12 months"], ["year", "This year"], ["all", "All time"],
 ];
 const INTERVALS = [["hour", "Hourly"], ["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"]];
+const SCALES = [["linear", "Linear"], ["log", "Log"], ["indexed", "Indexed (=100)"]];
 const MAX_SERIES = 8; // dataviz palette validates 8 slots for adjacent-pair (line) charts
+// Bounded metrics (a percentage, a ratio, a duration) have no orders of magnitude to
+// unfold, so a log axis just distorts them.
+const UNBOUNDED_METRICS = new Set(["visitors", "visits", "pageviews", "events"]);
 
 const metricSelect = document.getElementById("metric-select");
 const dateRangeSelect = document.getElementById("date-range-select");
 const intervalSelect = document.getElementById("interval-select");
+const scaleSelect = document.getElementById("scale-select");
+const filterChip = document.getElementById("filter-chip");
+const compareToggle = document.getElementById("compare-toggle");
+const copyButton = document.getElementById("copy-button");
 const tableToggle = document.getElementById("table-toggle");
 const card = document.getElementById("card");
 const chartArea = document.getElementById("chart-area");
@@ -196,16 +232,20 @@ function fillSelect(select, options, value) {
 fillSelect(metricSelect, METRICS, "visitors");
 fillSelect(dateRangeSelect, DATE_RANGES, "30d");
 fillSelect(intervalSelect, INTERVALS, "day");
+fillSelect(scaleSelect, SCALES, "linear");
 
 const CUSTOM_RANGE = "__custom__";
 
 let app = null;
 let ready = false;
-let current = null; // last successful { metric, interval, date_range, series }
+let current = null; // last successful { metric, interval, date_range, series, ... }
 let knownIds = [];
 let customRange = null; // the [from, to] pair behind the CUSTOM_RANGE option
 let visible = new Set();
 let tableView = false;
+let compare = false;
+let requestId = 0; // guards against a slow response landing after a newer one
+let contextTimer = null;
 
 // Axis ticks get compact notation; tooltips and the table stay exact, because
 // "hover for the exact value" is the whole point of the tooltip.
@@ -231,13 +271,47 @@ function setSelect(select, value) {
 }
 
 function setDateRange(value) {
-  if (!Array.isArray(value)) { setSelect(dateRangeSelect, value); return; }
+  const existing = [...dateRangeSelect.options].find((o) => o.value === CUSTOM_RANGE);
+  if (!Array.isArray(value)) {
+    // Drop a stale custom option, or its old dates stay selectable long after the
+    // chart has moved to a preset.
+    if (existing) existing.remove();
+    customRange = null;
+    setSelect(dateRangeSelect, value);
+    return;
+  }
   customRange = value;
-  const opt = [...dateRangeSelect.options].find((o) => o.value === CUSTOM_RANGE)
-    || dateRangeSelect.appendChild(document.createElement("option"));
+  const opt = existing || dateRangeSelect.appendChild(document.createElement("option"));
   opt.value = CUSTOM_RANGE;
   opt.textContent = value.join(" – ");
   dateRangeSelect.value = CUSTOM_RANGE;
+}
+
+// Each series is rebased to 100 at its own first real value, so sites whose traffic
+// differs by orders of magnitude can be compared on one axis. Returns null when a
+// series has no non-zero value to rebase from.
+function indexBase(points) {
+  const first = points.find((p) => typeof p.value === "number" && p.value !== 0);
+  return first ? first.value : null;
+}
+
+function scaled(value, mode, base) {
+  if (typeof value !== "number") return null;
+  if (mode === "indexed") return base ? (value / base) * 100 : null;
+  if (mode === "log") return value > 0 ? Math.log10(value) : null;
+  return value;
+}
+
+function deltaOf(currentValue, previousValue) {
+  if (typeof currentValue !== "number" || typeof previousValue !== "number") return null;
+  if (previousValue === 0) {
+    // A percentage change from zero is either undefined or infinite; say which.
+    return currentValue === 0 ? { text: "—", direction: 0 } : { text: "new", direction: 1 };
+  }
+  const change = ((currentValue - previousValue) / previousValue) * 100;
+  const rounded = Math.abs(change) >= 10 ? Math.round(change) : Math.round(change * 10) / 10;
+  const arrow = rounded > 0 ? "▲" : rounded < 0 ? "▼" : "";
+  return { text: `${arrow}${Math.abs(rounded)}%`, direction: Math.sign(rounded) };
 }
 
 // Sites can return different bucket sets (a site created mid-range, a gap in
@@ -285,28 +359,67 @@ function render() {
   tooltipEl.style.display = "none";
   if (tableView) renderTable(ids); else renderChart(ids);
   renderLegend(ids);
+  // One call site, so the initial result and every legend toggle are both covered
+  // without ever double-writing the model's context.
+  syncContext();
 }
 
 function renderLegend(ids) {
   legendEl.innerHTML = "";
+  const totals = current.totals || {};
+  const previousTotals = current.previous?.totals || {};
   ids.forEach((site, i) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "legend-item";
-    const on = visible.has(site);
-    btn.setAttribute("aria-pressed", String(on));
+    btn.setAttribute("aria-pressed", String(visible.has(site)));
     const swatch = document.createElement("span");
     swatch.className = "legend-swatch";
     swatch.style.background = seriesColor(i);
     const label = document.createElement("span");
     label.textContent = site; // untrusted data: textContent, not innerHTML
     btn.append(swatch, label);
+
+    if (totals[site] != null) {
+      const total = document.createElement("span");
+      total.className = "legend-total";
+      total.textContent = formatValue(current.metric, totals[site], true);
+      btn.appendChild(total);
+    }
+    const delta = current.compare ? deltaOf(totals[site], previousTotals[site]) : null;
+    if (delta) {
+      const span = document.createElement("span");
+      span.className = `legend-delta ${delta.direction > 0 ? "up" : delta.direction < 0 ? "down" : ""}`;
+      span.textContent = delta.text; // arrow + sign, so colour is never the only cue
+      btn.appendChild(span);
+    }
+
     btn.addEventListener("click", () => {
       if (visible.has(site)) visible.delete(site); else visible.add(site);
       render();
     });
     legendEl.appendChild(btn);
   });
+
+  const notes = [];
+  if (current.total_sites > ids.length) {
+    notes.push(`showing ${ids.length} of ${current.total_sites} sites`);
+  }
+  if (currentScale() === "indexed") {
+    // A series that never leaves zero has nothing to rebase from, so it is absent from
+    // the plot. Say so rather than letting it vanish.
+    const flat = ids.filter((s) => visible.has(s) && indexBase(current.series[s] || []) === null);
+    if (flat.length) notes.push(`${flat.length} with no baseline to index`);
+  }
+  if (current.compare && current.previous) {
+    notes.push(`vs ${current.previous.date_range.join(" – ")}`);
+  }
+  if (notes.length) {
+    const note = document.createElement("span");
+    note.className = "legend-note";
+    note.textContent = notes.join(" · ");
+    legendEl.appendChild(note);
+  }
 }
 
 function renderTable(ids) {
@@ -343,36 +456,102 @@ function el(tag, attrs) {
   return node;
 }
 
+// A log axis needs orders of magnitude to unfold, which a bounded metric has not.
+function currentScale() {
+  const mode = scaleSelect.value;
+  return mode === "log" && !UNBOUNDED_METRICS.has(current.metric) ? "linear" : mode;
+}
+
+function extent(values) {
+  let lo = Infinity, hi = -Infinity;
+  // A loop rather than Math.min(...values): a year of hourly buckets across 8 sites is
+  // enough arguments to blow the call stack.
+  for (const value of values) {
+    if (value < lo) lo = value;
+    if (value > hi) hi = value;
+  }
+  return values.length ? [lo, hi] : [0, 1];
+}
+
+function evenTicks(min, max, count = 4) {
+  return Array.from({ length: count + 1 }, (_, i) => min + ((max - min) / count) * i);
+}
+
+function yAxis(mode, values) {
+  const [lo, hi] = extent(values);
+  if (mode === "log") {
+    const min = Math.floor(lo);
+    const max = Math.max(Math.ceil(hi), min + 1);
+    return { min, max, ticks: Array.from({ length: max - min + 1 }, (_, i) => min + i) };
+  }
+  if (mode === "indexed") {
+    // Keep 100 on screen: it is the line every series is being compared against.
+    const low = Math.min(lo, 100), high = Math.max(hi, 100);
+    const pad = Math.max((high - low) * 0.1, 5);
+    const min = Math.max(0, Math.floor((low - pad) / 10) * 10);
+    const max = Math.ceil((high + pad) / 10) * 10;
+    return { min, max, ticks: evenTicks(min, max) };
+  }
+  const max = niceMax(Math.max(hi, 0) || 1);
+  return { min: 0, max, ticks: evenTicks(0, max) };
+}
+
 function renderChart(ids) {
-  const W = 900, H = 320, padL = 48, padR = 12, padT = 12, padB = 28;
+  const W = 900, H = 320, padL = 52, padR = 12, padT = 12, padB = 28;
   const plotW = W - padL - padR, plotH = H - padT - padB;
 
+  const mode = currentScale();
   const dates = axisDates(ids);
   const values = valuesByDate(ids);
   const n = dates.length;
   const visIds = ids.filter((s) => visible.has(s));
+  const bases = new Map();
 
-  let max = 0;
+  // One track per visible series, plus its dashed previous-period twin. The previous
+  // window covers different dates, so it is aligned by position: the point is to compare
+  // the shape of the two periods, not to read dates off it.
+  const tracks = [];
   visIds.forEach((site) => {
-    values.get(site).forEach((v) => { if (typeof v === "number") max = Math.max(max, v); });
-  });
-  if (max === 0) max = 1;
-  const yMax = niceMax(max);
+    const idx = ids.indexOf(site);
+    const own = current.series[site] || [];
+    const base = mode === "indexed" ? indexBase(own) : null;
+    if (mode === "indexed" && base === null) return; // nothing to rebase from
+    bases.set(site, base);
+    const byDate = values.get(site);
+    tracks.push({ idx, previous: false, points: dates.map((d) => scaled(byDate.get(d), mode, base)) });
 
+    const prior = current.previous?.series?.[site];
+    if (prior) {
+      const priorBase = mode === "indexed" ? indexBase(prior) : null;
+      tracks.push({
+        idx,
+        previous: true,
+        points: dates.map((_, i) => scaled(prior[i]?.value, mode, priorBase)),
+      });
+    }
+  });
+
+  const axis = yAxis(mode, tracks.flatMap((t) => t.points).filter((v) => v !== null));
+  const span = axis.max - axis.min || 1;
   const x = (i) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
-  const y = (v) => padT + plotH - (v / yMax) * plotH;
+  const y = (v) => padT + plotH - ((v - axis.min) / span) * plotH;
+  const tickLabel = (v) =>
+    mode === "log" ? formatValue(current.metric, Math.pow(10, v), true)
+      : mode === "indexed" ? String(Math.round(v))
+        : formatValue(current.metric, v, true);
 
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${metricLabel(current.metric)} over time` });
 
-  // gridlines + y ticks
-  const ticks = 4;
-  for (let t = 0; t <= ticks; t++) {
-    const v = (yMax / ticks) * t;
+  axis.ticks.forEach((v, t) => {
     const gy = y(v);
     svg.appendChild(el("line", { x1: padL, x2: W - padR, y1: gy, y2: gy, class: t === 0 ? "baseline" : "gridline" }));
     const label = el("text", { x: padL - 8, y: gy + 3, class: "axis-label", "text-anchor": "end" });
-    label.textContent = formatValue(current.metric, v, true);
+    label.textContent = tickLabel(v);
     svg.appendChild(label);
+  });
+
+  if (mode === "indexed" && axis.min < 100 && axis.max > 100) {
+    svg.appendChild(el("line", { x1: padL, x2: W - padR, y1: y(100), y2: y(100), class: "ref-line" }));
   }
 
   // x ticks: ~6 evenly spaced
@@ -385,23 +564,33 @@ function renderChart(ids) {
   }
 
   const lineGroup = el("g", {});
-  visIds.forEach((site) => {
-    const idx = ids.indexOf(site);
-    const points = values.get(site);
+  tracks.forEach((track) => {
     let d = "";
     let pen = "M"; // a missing bucket breaks the line rather than reading as zero
-    dates.forEach((date, i) => {
-      const v = points.get(date);
-      if (typeof v !== "number") { pen = "M"; return; }
+    track.points.forEach((v, i) => {
+      if (v === null) { pen = "M"; return; }
       d += `${pen} ${x(i).toFixed(1)} ${y(v).toFixed(1)} `;
       pen = "L";
-      lineGroup.appendChild(el("circle", { cx: x(i), cy: y(v), r: 4, fill: seriesColor(idx), class: "series-dot" }));
+      if (!track.previous) {
+        lineGroup.appendChild(el("circle", { cx: x(i), cy: y(v), r: 4, fill: seriesColor(track.idx), class: "series-dot" }));
+      }
     });
-    if (d) lineGroup.insertBefore(el("path", { d: d.trim(), class: "series-line", stroke: seriesColor(idx) }), lineGroup.firstChild);
+    if (d) {
+      lineGroup.insertBefore(el("path", {
+        d: d.trim(),
+        class: track.previous ? "series-line previous" : "series-line",
+        stroke: seriesColor(track.idx),
+      }), lineGroup.firstChild);
+    }
   });
   svg.appendChild(lineGroup);
 
-  const crosshair = el("line", { class: "crosshair", y1: padT, y2: padT + plotH, x1: -100, x2: -100 });
+  // Hidden rather than parked off to the left: the SVG has overflow visible, so a
+  // crosshair sitting at a negative x still paints beside the chart.
+  const crosshair = el("line", {
+    class: "crosshair", y1: padT, y2: padT + plotH, x1: padL, x2: padL,
+    visibility: "hidden",
+  });
   svg.appendChild(crosshair);
 
   const hit = el("rect", { x: padL, y: padT, width: plotW, height: plotH, class: "hit-layer" });
@@ -414,11 +603,11 @@ function renderChart(ids) {
     const i = n <= 1 ? 0 : Math.max(0, Math.min(n - 1, Math.round(((px - padL) / plotW) * (n - 1))));
     crosshair.setAttribute("x1", x(i));
     crosshair.setAttribute("x2", x(i));
-    showTooltip(evt, ids, visIds, values, dates[i]);
+    crosshair.setAttribute("visibility", "visible");
+    showTooltip(evt, ids, visIds, values, dates[i], mode, bases);
   });
   hit.addEventListener("pointerleave", () => {
-    crosshair.setAttribute("x1", -100);
-    crosshair.setAttribute("x2", -100);
+    crosshair.setAttribute("visibility", "hidden");
     tooltipEl.style.display = "none";
   });
   svg.appendChild(hit);
@@ -434,7 +623,7 @@ function niceMax(v) {
   return step * magnitude;
 }
 
-function showTooltip(evt, ids, visIds, values, date) {
+function showTooltip(evt, ids, visIds, values, date, mode, bases) {
   if (visIds.length === 0) { tooltipEl.style.display = "none"; return; }
   tooltipEl.innerHTML = "";
   const dateEl = document.createElement("div");
@@ -454,7 +643,12 @@ function showTooltip(evt, ids, visIds, values, date) {
     name.textContent = site;
     const value = document.createElement("span");
     value.className = "tooltip-value";
-    value.textContent = formatValue(current.metric, v);
+    // Indexed mode plots a ratio, so show the real number too — the axis alone can't
+    // tell you whether 120 means 12 visitors or 12,000.
+    const base = mode === "indexed" ? bases?.get(site) : null;
+    value.textContent = base
+      ? `${formatValue(current.metric, v)} (${Math.round((v / base) * 100)})`
+      : formatValue(current.metric, v);
     row.append(key, name, value);
     tooltipEl.appendChild(row);
   });
@@ -468,22 +662,31 @@ function showTooltip(evt, ids, visIds, values, date) {
 
 async function refetch() {
   if (!ready) return;
+  const mine = ++requestId;
   setLoading(true);
   try {
     const result = await app.callServerTool({
       name: "chart",
       arguments: {
-        site_ids: siteIds().length ? siteIds() : undefined,
+        // The sites that were asked for, not the ones that answered — otherwise a site
+        // that errors once is dropped from every refetch after it.
+        site_ids: current?.sites?.length ? current.sites : (siteIds().length ? siteIds() : undefined),
         metric: metricSelect.value,
         date_range: dateRangeSelect.value === CUSTOM_RANGE ? customRange : dateRangeSelect.value,
         interval: intervalSelect.value,
+        // Read off `current`, which is still the previous payload here — without this a
+        // filtered chart quietly turns into an unfiltered one on the first change.
+        filters: current?.filters?.length ? current.filters : undefined,
+        compare,
+        scale: scaleSelect.value,
       },
     });
+    if (mine !== requestId) return; // a newer request already landed
     applyResult(result);
   } catch (e) {
-    showMessage(String(e?.message || e), true);
+    if (mine === requestId) showMessage(String(e?.message || e), true);
   } finally {
-    setLoading(false);
+    if (mine === requestId) setLoading(false);
   }
 }
 
@@ -499,20 +702,98 @@ function applyResult(result) {
   setSelect(metricSelect, data.metric);
   setDateRange(data.date_range);
   setSelect(intervalSelect, data.interval);
+  if (data.scale) setSelect(scaleSelect, data.scale);
+
+  // The server reports what it actually did: compare is refused for open-ended ranges,
+  // and the toggle should show that rather than keep claiming otherwise.
+  compare = Boolean(data.compare);
+  compareToggle.setAttribute("aria-pressed", String(compare));
+
+  filterChip.hidden = !data.filters?.length;
+  if (data.filters?.length) filterChip.textContent = `filtered: ${JSON.stringify(data.filters)}`;
+  syncScaleOptions();
+
   const ids = Object.keys(data.series);
-  if (ids.join("\u0000") !== knownIds.join("\u0000")) {
-    knownIds = ids;
-    visible = new Set(ids); // reset the filter only when the site set changes
+  const fingerprint = [...ids].sort().join(" ");
+  if (fingerprint !== knownIds.join(" ")) {
+    knownIds = [...ids].sort(); // sorted, so a reordered set doesn't reset the filter
+    visible = new Set(ids); // reset the filter only when the site set really changes
   }
   render();
 }
 
+// Offering a log axis for a percentage is offering nonsense.
+function syncScaleOptions() {
+  const unbounded = UNBOUNDED_METRICS.has(metricSelect.value);
+  const logOption = [...scaleSelect.options].find((o) => o.value === "log");
+  if (logOption) logOption.disabled = !unbounded;
+  if (!unbounded && scaleSelect.value === "log") scaleSelect.value = "linear";
+}
+
 [metricSelect, dateRangeSelect, intervalSelect].forEach((select) => select.addEventListener("change", refetch));
+scaleSelect.addEventListener("change", render); // pure re-render; the data is unchanged
+metricSelect.addEventListener("change", syncScaleOptions);
+compareToggle.addEventListener("click", () => {
+  compare = !compare;
+  compareToggle.setAttribute("aria-pressed", String(compare));
+  refetch();
+});
 tableToggle.addEventListener("click", () => {
   tableView = !tableView;
   tableToggle.setAttribute("aria-pressed", String(tableView));
   render();
 });
+
+if (navigator.clipboard) {
+  copyButton.hidden = false;
+  copyButton.addEventListener("click", async () => {
+    const ids = siteIds();
+    const dates = axisDates(ids);
+    const values = valuesByDate(ids);
+    // No escaping needed: domains, ISO dates and numbers contain no commas.
+    const rows = [["date", ...ids].join(",")];
+    dates.forEach((date) => {
+      rows.push([date, ...ids.map((s) => values.get(s).get(date) ?? "")].join(","));
+    });
+    const say = (text) => {
+      copyButton.textContent = text;
+      setTimeout(() => { copyButton.textContent = "Copy CSV"; }, 1500);
+    };
+    try {
+      await navigator.clipboard.writeText(rows.join("\n"));
+      say("Copied");
+    } catch {
+      say("Copy failed");
+    }
+  });
+}
+
+// Tell the model what is on screen, so a follow-up like "why did that spike?" has
+// something to work with. Each call replaces the last, so always send a whole snapshot.
+function syncContext() {
+  if (!ready || !current || !app.getHostCapabilities()?.updateModelContext) return;
+  clearTimeout(contextTimer);
+  contextTimer = setTimeout(() => {
+    const shown = siteIds().filter((s) => visible.has(s));
+    const totals = current.totals || {};
+    const previousTotals = current.previous?.totals || {};
+    const lines = shown.map((site) => {
+      const delta = current.compare ? deltaOf(totals[site], previousTotals[site]) : null;
+      const total = formatValue(current.metric, totals[site]);
+      return `- ${site}: ${total}${delta ? ` (${delta.text} vs previous period)` : ""}`;
+    });
+    const range = Array.isArray(current.date_range)
+      ? current.date_range.join(" to ")
+      : current.date_range;
+    const text = [
+      `The user is looking at a chart of ${metricLabel(current.metric)} over ${range}, `
+        + `bucketed by ${current.interval}, on a ${currentScale()} y-axis.`,
+      current.filters?.length ? `Filters applied: ${JSON.stringify(current.filters)}` : "",
+      shown.length ? `Sites shown:` + "\n" + lines.join("\n") : "No sites are currently shown.",
+    ].filter(Boolean).join("\n\n");
+    app.updateModelContext({ content: [{ type: "text", text }] }).catch(() => {});
+  }, 500);
+}
 
 function handleHostContextChanged(ctx) {
   if (ctx.theme) applyDocumentTheme(ctx.theme);
@@ -521,10 +802,12 @@ function handleHostContextChanged(ctx) {
 }
 
 app = new App({ name: "Plausible Chart", version: "1.0.0" });
-app.onteardown = async () => ({});
+app.onteardown = async () => { clearTimeout(contextTimer); return {}; };
 app.onerror = console.error;
 app.onhostcontextchanged = handleHostContextChanged;
-app.ontoolresult = (result) => applyResult(result);
+// A result the model just fetched is newer than any refetch still in flight, so retire
+// that request rather than letting it land on top.
+app.ontoolresult = (result) => { requestId++; applyResult(result); };
 
 showMessage("Loading…", false);
 app.connect().then(() => {

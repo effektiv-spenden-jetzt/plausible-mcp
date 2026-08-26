@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<title>Plausible Chart</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+    --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff;
+      --text-secondary: #c3c2b7; --text-muted: #898781;
+      --gridline: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+      --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff;
+    --text-secondary: #c3c2b7; --text-muted: #898781;
+    --gridline: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page);
+    color: var(--text-primary);
+  }
+  .viz-root { background: var(--page); padding: 12px; }
+
+  .filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .filters select, .filters button {
+    font: inherit;
+    color: var(--text-primary);
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 8px;
+  }
+  .filters button { cursor: pointer; }
+  .filters button[aria-pressed="true"] { border-color: var(--series-1); color: var(--series-1); }
+  .spacer { flex: 1; }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    position: relative;
+  }
+  .card.loading svg, .card.loading .table-wrap { opacity: 0.45; transition: opacity .15s; }
+
+  svg { display: block; width: 100%; height: 320px; overflow: visible; }
+  .gridline { stroke: var(--gridline); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1; }
+  .axis-label { fill: var(--text-muted); font-size: 11px; }
+  .series-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .series-dot { stroke: var(--surface-1); stroke-width: 2; }
+  .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+  .hit-layer { fill: transparent; cursor: crosshair; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: none;
+    border: none;
+    padding: 2px 0;
+  }
+  .legend-item[aria-pressed="false"] { opacity: 0.4; }
+  .legend-swatch { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    min-width: 140px;
+    display: none;
+  }
+  .tooltip-date { color: var(--text-muted); margin-bottom: 4px; }
+  .tooltip-row { display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+  .tooltip-row + .tooltip-row { margin-top: 2px; }
+  .tooltip-key { width: 10px; height: 2px; border-radius: 1px; flex: none; }
+  .tooltip-name { color: var(--text-secondary); flex: 1; }
+  .tooltip-value { color: var(--text-primary); font-weight: 600; }
+
+  .table-wrap { max-height: 320px; overflow: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-muted); font-weight: 500; position: sticky; top: 0; background: var(--surface-1); }
+
+  .empty, .error {
+    padding: 40px 12px;
+    text-align: center;
+    color: var(--text-muted);
+  }
+  .error { color: #e34948; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <div class="filters">
+    <select id="metric-select" aria-label="Metric"></select>
+    <select id="date-range-select" aria-label="Date range"></select>
+    <select id="interval-select" aria-label="Scale"></select>
+    <div class="spacer"></div>
+    <button id="table-toggle" type="button" aria-pressed="false">Table view</button>
+  </div>
+  <div class="card" id="card">
+    <div id="chart-area"></div>
+    <div class="legend" id="legend"></div>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+</div>
+<script type="module">
+const BUNDLE_B64 = "__EXT_APPS_BUNDLE_B64__";
+const bytes = Uint8Array.from(atob(BUNDLE_B64), (c) => c.charCodeAt(0));
+const blobUrl = URL.createObjectURL(new Blob([bytes], { type: "text/javascript" }));
+const { App, applyDocumentTheme, applyHostFonts, applyHostStyleVariables } = await import(blobUrl);
+URL.revokeObjectURL(blobUrl);
+
+const METRICS = [
+  ["visitors", "Visitors"], ["visits", "Visits"], ["pageviews", "Pageviews"],
+  ["views_per_visit", "Views / visit"], ["bounce_rate", "Bounce rate"],
+  ["visit_duration", "Visit duration"], ["events", "Events"],
+];
+const DATE_RANGES = [
+  ["7d", "Last 7 days"], ["28d", "Last 28 days"], ["30d", "Last 30 days"],
+  ["91d", "Last 91 days"], ["month", "This month"], ["6mo", "Last 6 months"],
+  ["12mo", "Last 12 months"], ["year", "This year"], ["all", "All time"],
+];
+const INTERVALS = [["hour", "Hourly"], ["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"]];
+const MAX_SERIES = 8; // dataviz palette validates 8 slots for adjacent-pair (line) charts
+
+const metricSelect = document.getElementById("metric-select");
+const dateRangeSelect = document.getElementById("date-range-select");
+const intervalSelect = document.getElementById("interval-select");
+const tableToggle = document.getElementById("table-toggle");
+const card = document.getElementById("card");
+const chartArea = document.getElementById("chart-area");
+const legendEl = document.getElementById("legend");
+const tooltipEl = document.getElementById("tooltip");
+
+function fillSelect(select, options, value) {
+  select.replaceChildren(...options.map(([v, label]) => {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = label;
+    if (v === value) opt.selected = true;
+    return opt;
+  }));
+}
+fillSelect(metricSelect, METRICS, "visitors");
+fillSelect(dateRangeSelect, DATE_RANGES, "30d");
+fillSelect(intervalSelect, INTERVALS, "day");
+
+const CUSTOM_RANGE = "__custom__";
+
+let app = null;
+let ready = false;
+let current = null; // last successful { metric, interval, date_range, series }
+let knownIds = [];
+let customRange = null; // the [from, to] pair behind the CUSTOM_RANGE option
+let visible = new Set();
+let tableView = false;
+
+// Axis ticks get compact notation; tooltips and the table stay exact, because
+// "hover for the exact value" is the whole point of the tooltip.
+function formatValue(metric, v, compact) {
+  if (v == null) return "–";
+  if (metric === "bounce_rate" || metric === "conversion_rate") return `${v}%`;
+  if (metric === "visit_duration") return `${Math.round(v)}s`;
+  if (typeof v !== "number") return String(v);
+  return new Intl.NumberFormat(undefined, compact
+    ? { notation: "compact", maximumFractionDigits: 1 }
+    : { maximumFractionDigits: 2 }).format(v);
+}
+
+// The model may pass a metric or range that is not one of our presets. Add an
+// option for it rather than letting select.value silently become "".
+function setSelect(select, value) {
+  if (value == null) return;
+  const v = String(value);
+  if (![...select.options].some((o) => o.value === v)) {
+    select.append(Object.assign(document.createElement("option"), { value: v, textContent: v }));
+  }
+  select.value = v;
+}
+
+function setDateRange(value) {
+  if (!Array.isArray(value)) { setSelect(dateRangeSelect, value); return; }
+  customRange = value;
+  const opt = [...dateRangeSelect.options].find((o) => o.value === CUSTOM_RANGE)
+    || dateRangeSelect.appendChild(document.createElement("option"));
+  opt.value = CUSTOM_RANGE;
+  opt.textContent = value.join(" – ");
+  dateRangeSelect.value = CUSTOM_RANGE;
+}
+
+// Sites can return different bucket sets (a site created mid-range, a gap in
+// imports), so the axis is the union of every visible date, not series[0]'s.
+function axisDates(ids) {
+  const dates = new Set();
+  ids.forEach((s) => (current.series[s] || []).forEach((p) => { if (p.date != null) dates.add(p.date); }));
+  return [...dates].sort();
+}
+
+function valuesByDate(ids) {
+  return new Map(ids.map((s) => [s, new Map((current.series[s] || []).map((p) => [p.date, p.value]))]));
+}
+
+function metricLabel(metric) {
+  return (METRICS.find(([v]) => v === metric) || [metric, metric])[1];
+}
+
+function siteIds() {
+  return current ? Object.keys(current.series) : [];
+}
+
+function seriesColor(index) {
+  return `var(--series-${(index % MAX_SERIES) + 1})`;
+}
+
+function setLoading(isLoading) {
+  card.classList.toggle("loading", isLoading);
+}
+
+function showMessage(text, isError) {
+  chartArea.innerHTML = "";
+  legendEl.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = isError ? "error" : "empty";
+  div.textContent = text;
+  chartArea.appendChild(div);
+}
+
+function render() {
+  if (!current) return;
+  const ids = siteIds();
+  if (ids.length === 0) { showMessage("No sites returned.", false); return; }
+
+  tooltipEl.style.display = "none";
+  if (tableView) renderTable(ids); else renderChart(ids);
+  renderLegend(ids);
+}
+
+function renderLegend(ids) {
+  legendEl.innerHTML = "";
+  ids.forEach((site, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "legend-item";
+    const on = visible.has(site);
+    btn.setAttribute("aria-pressed", String(on));
+    const swatch = document.createElement("span");
+    swatch.className = "legend-swatch";
+    swatch.style.background = seriesColor(i);
+    const label = document.createElement("span");
+    label.textContent = site; // untrusted data: textContent, not innerHTML
+    btn.append(swatch, label);
+    btn.addEventListener("click", () => {
+      if (visible.has(site)) visible.delete(site); else visible.add(site);
+      render();
+    });
+    legendEl.appendChild(btn);
+  });
+}
+
+function renderTable(ids) {
+  const dates = axisDates(ids);
+  const values = valuesByDate(ids);
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  headRow.appendChild(Object.assign(document.createElement("th"), { textContent: "Date" }));
+  ids.forEach((site) => headRow.appendChild(Object.assign(document.createElement("th"), { textContent: site })));
+  thead.appendChild(headRow);
+  const tbody = document.createElement("tbody");
+  dates.forEach((date) => {
+    const row = document.createElement("tr");
+    row.appendChild(Object.assign(document.createElement("td"), { textContent: date ?? "" }));
+    ids.forEach((site) => {
+      const v = values.get(site).get(date);
+      row.appendChild(Object.assign(document.createElement("td"), { textContent: formatValue(current.metric, v) }));
+    });
+    tbody.appendChild(row);
+  });
+  table.append(thead, tbody);
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+  wrap.appendChild(table);
+  chartArea.innerHTML = "";
+  chartArea.appendChild(wrap);
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  return node;
+}
+
+function renderChart(ids) {
+  const W = 900, H = 320, padL = 48, padR = 12, padT = 12, padB = 28;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const dates = axisDates(ids);
+  const values = valuesByDate(ids);
+  const n = dates.length;
+  const visIds = ids.filter((s) => visible.has(s));
+
+  let max = 0;
+  visIds.forEach((site) => {
+    values.get(site).forEach((v) => { if (typeof v === "number") max = Math.max(max, v); });
+  });
+  if (max === 0) max = 1;
+  const yMax = niceMax(max);
+
+  const x = (i) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const y = (v) => padT + plotH - (v / yMax) * plotH;
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${metricLabel(current.metric)} over time` });
+
+  // gridlines + y ticks
+  const ticks = 4;
+  for (let t = 0; t <= ticks; t++) {
+    const v = (yMax / ticks) * t;
+    const gy = y(v);
+    svg.appendChild(el("line", { x1: padL, x2: W - padR, y1: gy, y2: gy, class: t === 0 ? "baseline" : "gridline" }));
+    const label = el("text", { x: padL - 8, y: gy + 3, class: "axis-label", "text-anchor": "end" });
+    label.textContent = formatValue(current.metric, v, true);
+    svg.appendChild(label);
+  }
+
+  // x ticks: ~6 evenly spaced
+  const xTickCount = Math.min(6, n);
+  for (let t = 0; t < xTickCount; t++) {
+    const i = n <= 1 ? 0 : Math.round((t / (xTickCount - 1)) * (n - 1));
+    const label = el("text", { x: x(i), y: H - 8, class: "axis-label", "text-anchor": "middle" });
+    label.textContent = dates[i] ?? "";
+    svg.appendChild(label);
+  }
+
+  const lineGroup = el("g", {});
+  visIds.forEach((site) => {
+    const idx = ids.indexOf(site);
+    const points = values.get(site);
+    let d = "";
+    let pen = "M"; // a missing bucket breaks the line rather than reading as zero
+    dates.forEach((date, i) => {
+      const v = points.get(date);
+      if (typeof v !== "number") { pen = "M"; return; }
+      d += `${pen} ${x(i).toFixed(1)} ${y(v).toFixed(1)} `;
+      pen = "L";
+      lineGroup.appendChild(el("circle", { cx: x(i), cy: y(v), r: 4, fill: seriesColor(idx), class: "series-dot" }));
+    });
+    if (d) lineGroup.insertBefore(el("path", { d: d.trim(), class: "series-line", stroke: seriesColor(idx) }), lineGroup.firstChild);
+  });
+  svg.appendChild(lineGroup);
+
+  const crosshair = el("line", { class: "crosshair", y1: padT, y2: padT + plotH, x1: -100, x2: -100 });
+  svg.appendChild(crosshair);
+
+  const hit = el("rect", { x: padL, y: padT, width: plotW, height: plotH, class: "hit-layer" });
+  hit.addEventListener("pointermove", (evt) => {
+    // Map through the SVG's own CTM: the viewBox does not always span the full
+    // element width (a panel wider than W letterboxes it horizontally).
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return;
+    const px = new DOMPoint(evt.clientX, evt.clientY).matrixTransform(ctm.inverse()).x;
+    const i = n <= 1 ? 0 : Math.max(0, Math.min(n - 1, Math.round(((px - padL) / plotW) * (n - 1))));
+    crosshair.setAttribute("x1", x(i));
+    crosshair.setAttribute("x2", x(i));
+    showTooltip(evt, ids, visIds, values, dates[i]);
+  });
+  hit.addEventListener("pointerleave", () => {
+    crosshair.setAttribute("x1", -100);
+    crosshair.setAttribute("x2", -100);
+    tooltipEl.style.display = "none";
+  });
+  svg.appendChild(hit);
+
+  chartArea.innerHTML = "";
+  chartArea.appendChild(svg);
+}
+
+function niceMax(v) {
+  const magnitude = Math.pow(10, Math.floor(Math.log10(v || 1)));
+  const norm = v / magnitude;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return step * magnitude;
+}
+
+function showTooltip(evt, ids, visIds, values, date) {
+  if (visIds.length === 0) { tooltipEl.style.display = "none"; return; }
+  tooltipEl.innerHTML = "";
+  const dateEl = document.createElement("div");
+  dateEl.className = "tooltip-date";
+  dateEl.textContent = date ?? "";
+  tooltipEl.appendChild(dateEl);
+  visIds.forEach((site) => {
+    const idx = ids.indexOf(site);
+    const v = values.get(site)?.get(date);
+    const row = document.createElement("div");
+    row.className = "tooltip-row";
+    const key = document.createElement("span");
+    key.className = "tooltip-key";
+    key.style.background = seriesColor(idx);
+    const name = document.createElement("span");
+    name.className = "tooltip-name";
+    name.textContent = site;
+    const value = document.createElement("span");
+    value.className = "tooltip-value";
+    value.textContent = formatValue(current.metric, v);
+    row.append(key, name, value);
+    tooltipEl.appendChild(row);
+  });
+  const cardRect = card.getBoundingClientRect();
+  tooltipEl.style.display = "block";
+  let left = evt.clientX - cardRect.left + 14;
+  if (left + 160 > cardRect.width) left = evt.clientX - cardRect.left - 174;
+  tooltipEl.style.left = `${left}px`;
+  tooltipEl.style.top = `${evt.clientY - cardRect.top - 10}px`;
+}
+
+async function refetch() {
+  if (!ready) return;
+  setLoading(true);
+  try {
+    const result = await app.callServerTool({
+      name: "chart",
+      arguments: {
+        site_ids: siteIds().length ? siteIds() : undefined,
+        metric: metricSelect.value,
+        date_range: dateRangeSelect.value === CUSTOM_RANGE ? customRange : dateRangeSelect.value,
+        interval: intervalSelect.value,
+      },
+    });
+    applyResult(result);
+  } catch (e) {
+    showMessage(String(e?.message || e), true);
+  } finally {
+    setLoading(false);
+  }
+}
+
+function applyResult(result) {
+  if (result.isError) {
+    const text = (result.content || []).map((c) => c.text).filter(Boolean).join(" ") || "Request failed.";
+    showMessage(text, true);
+    return;
+  }
+  const data = result.structuredContent;
+  if (!data || !data.series) { showMessage("No data returned.", false); return; }
+  current = data;
+  setSelect(metricSelect, data.metric);
+  setDateRange(data.date_range);
+  setSelect(intervalSelect, data.interval);
+  const ids = Object.keys(data.series);
+  if (ids.join("\u0000") !== knownIds.join("\u0000")) {
+    knownIds = ids;
+    visible = new Set(ids); // reset the filter only when the site set changes
+  }
+  render();
+}
+
+[metricSelect, dateRangeSelect, intervalSelect].forEach((select) => select.addEventListener("change", refetch));
+tableToggle.addEventListener("click", () => {
+  tableView = !tableView;
+  tableToggle.setAttribute("aria-pressed", String(tableView));
+  render();
+});
+
+function handleHostContextChanged(ctx) {
+  if (ctx.theme) applyDocumentTheme(ctx.theme);
+  if (ctx.styles?.variables) applyHostStyleVariables(ctx.styles.variables);
+  if (ctx.styles?.css?.fonts) applyHostFonts(ctx.styles.css.fonts);
+}
+
+app = new App({ name: "Plausible Chart", version: "1.0.0" });
+app.onteardown = async () => ({});
+app.onerror = console.error;
+app.onhostcontextchanged = handleHostContextChanged;
+app.ontoolresult = (result) => applyResult(result);
+
+showMessage("Loading…", false);
+app.connect().then(() => {
+  ready = true;
+  const ctx = app.getHostContext();
+  if (ctx) handleHostContextChanged(ctx);
+}).catch((e) => showMessage(`Could not connect to the host: ${e?.message || e}`, true));
+</script>
+</body>
+</html>

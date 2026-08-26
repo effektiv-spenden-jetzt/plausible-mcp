@@ -1,5 +1,6 @@
 """Run with: python test_server.py"""
 
+import asyncio
 import os
 
 os.environ.setdefault("ALLOWED_DOMAINS", "example.com")
@@ -9,6 +10,7 @@ os.environ.setdefault("GOOGLE_CLIENT_SECRET", "GOCSPX-test")
 os.environ.setdefault("BASE_URL", "http://localhost:8000")
 os.environ.setdefault("PLAUSIBLE_API_KEY", "test-key")
 
+import server  # noqa: E402
 from server import bump, build_query, is_allowed, is_verified, to_rows  # noqa: E402
 
 
@@ -85,6 +87,42 @@ def test_bump_does_not_mutate_input_tools():
     original = entry["tools"]
     bump(entry, "query", 2.0)
     assert original == {"query": 1}, "caller's nested dict stays untouched"
+
+
+def test_chart_overlays_sites_and_caps_at_max_series():
+    async def fake_plausible(path, method="POST", json=None):
+        assert json["dimensions"] == ["time:day"]
+        return {"results": [{"dimensions": ["2026-08-01"], "metrics": [10]}]}
+
+    original = server.plausible
+    server.plausible = fake_plausible
+    try:
+        result = asyncio.run(server.chart(
+            site_ids=[f"site{i}.com" for i in range(10)], metric="visitors",
+            date_range="7d", interval="day",
+        ))
+    finally:
+        server.plausible = original
+
+    assert result["metric"] == "visitors" and result["interval"] == "day"
+    assert len(result["series"]) == server.MAX_CHART_SERIES, "caps to the palette's slot count"
+    assert result["series"]["site0.com"] == [{"date": "2026-08-01", "value": 10}]
+
+
+def test_chart_defaults_to_all_sites():
+    async def fake_plausible(path, method="POST", json=None):
+        if "sites" in path:
+            return {"sites": [{"domain": "a.com"}, {"domain": "b.com"}]}
+        return {"results": []}
+
+    original = server.plausible
+    server.plausible = fake_plausible
+    try:
+        result = asyncio.run(server.chart())
+    finally:
+        server.plausible = original
+
+    assert set(result["series"]) == {"a.com", "b.com"}
 
 
 if __name__ == "__main__":

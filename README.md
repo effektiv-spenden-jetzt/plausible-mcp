@@ -39,6 +39,10 @@ at once, at the cost of signing everybody out.
   timeseries, breakdowns and goal conversions from the same tool. To compare two
   periods, call it once per period.
 - `list_sites` returns the site domains you can pass as `site_id`.
+- `chart` renders an interactive chart overlaying one metric across one or more
+  sites, in hosts that support [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
+  (e.g. Claude Desktop). The viewer can toggle sites, switch metric, date range
+  and interval, and hover for exact values without asking the model again.
 - `usage_stats` reports who has used the server, how often, and which accounts were
   refused.
 

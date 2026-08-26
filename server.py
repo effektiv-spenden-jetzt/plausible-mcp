@@ -5,18 +5,27 @@ registration, which Google does not support. So this server acts as its own
 authorization server and delegates the human login upstream to Google.
 """
 
+import asyncio
+import base64
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import diskcache
 import httpx
 from fastmcp import FastMCP
+from fastmcp.apps import AppConfig
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
+
+ROOT = Path(__file__).parent
+CHART_RESOURCE_URI = "ui://chart/mcp-app.html"
+MAX_CHART_SERIES = 8  # matches the dataviz palette's validated categorical slot count
+CHART_LIMIT = 10000  # Plausible's max page size; hourly over 12mo is 8760 buckets
 
 
 def env_set(name: str) -> set[str]:
@@ -153,6 +162,18 @@ def build_server() -> FastMCP:
 mcp = build_server()
 
 
+def build_chart_html() -> str:
+    """Inline the vendored MCP Apps client bundle into the chart UI resource as a
+    base64 data blob, so the resource is self-contained HTML with no build step
+    and no runtime network dependency."""
+    bundle_b64 = base64.b64encode((ROOT / "vendor" / "ext-apps-app.js").read_bytes()).decode()
+    html = (ROOT / "chart_app.html").read_text()
+    return html.replace("__EXT_APPS_BUNDLE_B64__", bundle_b64)
+
+
+CHART_HTML = build_chart_html()
+
+
 async def plausible(path: str, method: str = "POST", json: dict | None = None) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.request(
@@ -226,11 +247,58 @@ async def query(
     }
 
 
+async def site_domains() -> list[str]:
+    payload = await plausible("/api/v1/sites?limit=100", method="GET")
+    return [site["domain"] for site in payload.get("sites", [])]
+
+
 @mcp.tool
 async def list_sites() -> list[str]:
     """List the Plausible sites this server can query, as domains to pass as site_id."""
-    payload = await plausible("/api/v1/sites?limit=100", method="GET")
-    return [site["domain"] for site in payload.get("sites", [])]
+    return await site_domains()
+
+
+@mcp.tool(app=AppConfig(resource_uri=CHART_RESOURCE_URI))
+async def chart(
+    site_ids: list[str] | None = None,
+    metric: str = "visitors",
+    date_range: str | list[str] = "30d",
+    interval: str = "day",
+) -> dict:
+    """Render an interactive chart comparing one metric across one or more sites
+    over time, overlaid on shared axes. The chart lets the viewer toggle sites,
+    switch metric, date range and interval, and hover for exact values, without
+    involving the model again.
+
+    site_ids: domains to overlay, as returned by list_sites. Omit to chart every
+      site this server can query (capped at 8 — the categorical palette caps out
+      there too).
+
+    metric: any single metric accepted by the `query` tool, for example visitors,
+      visits, pageviews, views_per_visit or bounce_rate.
+
+    date_range: same values as `query`'s date_range.
+
+    interval: hour, day, week or month — how the time series is bucketed.
+    """
+    ids = (site_ids or await site_domains())[:MAX_CHART_SERIES]
+    dims = [f"time:{interval}"]
+
+    async def points(site_id: str) -> list[dict]:
+        body = build_query(site_id, [metric], date_range, dims, None, None, CHART_LIMIT, True)
+        payload = await plausible("/api/v2/query", json=body)
+        return [
+            {"date": row.get(dims[0]), "value": row.get(metric)}
+            for row in to_rows(payload, [metric], dims)
+        ]
+
+    series = dict(zip(ids, await asyncio.gather(*(points(site_id) for site_id in ids))))
+    return {"metric": metric, "interval": interval, "date_range": date_range, "series": series}
+
+
+@mcp.resource(CHART_RESOURCE_URI)
+def chart_ui() -> str:
+    return CHART_HTML
 
 
 @mcp.tool

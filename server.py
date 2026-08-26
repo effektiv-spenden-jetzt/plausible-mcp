@@ -375,8 +375,11 @@ async def chart(
 
     filters: same shape as `query`'s filters, applied to every site.
 
-    compare: also fetch the equal-length period immediately before, so the chart can
-      show each site's change. Ignored for date_range "all" and for rolling windows
+    compare: leave false unless the person actually asked to compare periods, or asked
+      whether something is up or down. It is not a free extra: it doubles the queries
+      and draws a second dashed line per site, which crowds the chart when nobody asked
+      for it. When true, fetches the equal-length period immediately before so each
+      site's change can be shown. Ignored for date_range "all" and for rolling windows
       like "24h", which have no comparable preceding period.
 
     scale: the y-axis the chart opens on — "linear", "log", or "indexed" (every site
